@@ -12,16 +12,10 @@ ADMIN_USERNAME = 'FILL YOUR USERNAME'
 # To notify the users before a bot update/restart
 chats_id_list = list()
 
-
 TIME_BETWEEN_POOLS = 120
-
 
 # Telegram BOT states
 SET_WALLET_ADDR, SET_MIN_HASHRATE_THRESHOLD, NOTIFY_ON_NEW_BALANCE, IDLE = range(4)
-
-# Logging features
-total_number_of_jobs_created = 0
-
 
 # Telegram BOT job callbacks
 
@@ -107,6 +101,9 @@ def notify_on_new_balance(update, context):
         job = job_queue.run_repeating(job_balance, interval=TIME_BETWEEN_POOLS, first=0, context=chat_data)
         chat_data['jobs'].append(job)
 
+    else:
+        chat_data['monitor_balance'] = False
+        
     return welcome_idle(update, context)
 
 
@@ -135,10 +132,12 @@ def welcome_idle(update, context):
     n_jobs = len(chat_data['jobs'])
     monitor_balance = chat_data['monitor_balance']
     min_hashrate_threshold = chat_data['min_hashrate_threshold']
-    bot.send_message(chat_id=chat_data['chat_id'], text = (f"{n_jobs} job(s) started. \n"
+    bot.send_message(chat_id=chat_data['chat_id'], text = (f"{n_jobs} job(s) running. \n"
                                                             f"Balance monitoring: {monitor_balance}\n"
                                                             f"Min hashrate threshold: {min_hashrate_threshold} MH/S\n"
-                                                            "Send /stats to see statistics of your miner"))
+                                                            "Send /stats to see statistics of your miner\n"
+                                                            "Send /status to see the status of your jobs\n"
+                                                            "Send /cancel to stop your jobs"))
     return IDLE
 
 def stats(update, context):
@@ -155,6 +154,7 @@ def stats(update, context):
     bot.send_message(chat_id=chat_data['chat_id'], text=stats_str)
     return IDLE
 
+
 updater = Updater(token=BOT_TOKEN)
 
 dispatcher = updater.dispatcher
@@ -169,7 +169,7 @@ handler = ConversationHandler(
 
         NOTIFY_ON_NEW_BALANCE: [CallbackQueryHandler(notify_on_new_balance)],
 
-        IDLE: [CommandHandler('stats', stats)],
+        IDLE: [CommandHandler('stats', stats), CommandHandler('status', welcome_idle)],
     },
     fallbacks=[CommandHandler('cancel', cancel)]
 )
