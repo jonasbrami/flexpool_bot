@@ -3,7 +3,7 @@ from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters,
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import flexpoolapi
 import logging
-from time import sleep
+from si_prefix import si_format
 
 #LOGGING
 logging.basicConfig(
@@ -135,11 +135,11 @@ def stats(update, context):
 
     stats_str = ''
     stats = chat_data['miner'].stats()
-    for field in [
-        'current_effective_hashrate','current_reported_hashrate',
-        'average_effective_hashrate','average_reported_hashrate',
-        'valid_shares', 'stale_shares', 'invalid_shares' ] :
-        stats_str += f"{field} : {getattr(stats,field):.0f}\n"
+    for field, unit, precision in [
+        ('current_effective_hashrate','H/S', 2), ('current_reported_hashrate', 'H/S', 2),
+        ('average_effective_hashrate', 'H/S', 2), ('average_reported_hashrate', 'H/S', 2),
+        ('valid_shares', '', 0), ('stale_shares', '', 0), ('invalid_shares','', 0) ] :
+        stats_str += f"{field.replace('_',' ').title()} : {si_format(getattr(stats,field), precision=precision) if precision else getattr(stats,field)}{unit}\n"
     bot.send_message(chat_id=chat_data['chat_id'], text=stats_str)
     return IDLE
 
@@ -157,7 +157,7 @@ def snooze(update, context):
         bot.send_message(chat_id=chat_data['chat_id'], text="Nothing to snooze")
     else:
         bot.send_message(chat_id=chat_data['chat_id'], text="Hashrate alerts snoozed for 30min")
-        job_queue.run_repeating(job_hashrate, interval=TIME_BETWEEN_POOLS, first=2, context=chat_data, name=chat_data['chat_id']+'hashrate')
+        job_queue.run_repeating(job_hashrate, interval=TIME_BETWEEN_POOLS, first=30*60, context=chat_data, name=chat_data['chat_id']+'hashrate')
     return IDLE
 
 def error_handler(update, context) -> None:
