@@ -2,6 +2,7 @@ from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters,
                               ConversationHandler,CallbackQueryHandler, PicklePersistence)
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import flexpoolapi
+from flexpoolapi.utils import format_weis
 import logging
 from si_prefix import si_format
 
@@ -43,9 +44,9 @@ def job_balance(context):
         balance_old = chat_data['balance_old']
         if chat_data['balance_old'] != balance_new:
             bot.send_message(chat_id=chat_data['chat_id'],
-                         text=(f"Balanced has changed: {(balance_new-balance_old)/1e18:+.4f}\n"
-                               f"old balance: {balance_old/1e18:.4f}ETH\n"
-                               f"new balance: {balance_new/1e18:.4f}ETH"))
+                         text=(f"Balanced has changed: {(balance_new-balance_old)/1e18:+.5f} ETH\n"
+                               f"old balance: {format_weis(balance_old)}\n"
+                               f"new balance: {format_weis(balance_new)}"))
             chat_data['balance_old'] = balance_new
 
 # Telegram BOT states and fallbacks callbacks
@@ -146,7 +147,7 @@ def stats(update, context):
 def get_balance(update, context):
     chat_data = context.chat_data
     bot = context.bot
-    bot.send_message(chat_id=chat_data['chat_id'], text=f"Current balance: {chat_data['miner'].balance()/1e18:.4f}")
+    bot.send_message(chat_id=chat_data['chat_id'], text=f"Current balance: {format_weis(chat_data['miner'].balance())}")
 
 def snooze(update, context):
     chat_data = context.chat_data
