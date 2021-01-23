@@ -1,10 +1,12 @@
 from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters,
-                              ConversationHandler,CallbackQueryHandler, PicklePersistence)
+                              ConversationHandler,CallbackQueryHandler, PicklePersistence, messagequeue as mq)
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import flexpoolapi
 from flexpoolapi.utils import format_weis
 import logging
 from si_prefix import si_format
+from cryptocompare import get_price
+from random import randint
 
 #LOGGING
 logging.basicConfig(
@@ -16,10 +18,16 @@ logger = logging.getLogger(__name__)
 # SECURITY CONSTANTS
 BOT_TOKEN = 'YOUR TOKEN FROM BOTFATHER'
 
-TIME_BETWEEN_POOLS = 120
+#Job time intervals
+HASHRATE_POLL_INVERVAL = 120
+BALANCE_POLL_INVERVAL = 60
 
 # Telegram BOT states
 SET_WALLET_ADDR, SET_MIN_HASHRATE_THRESHOLD, NOTIFY_ON_NEW_BALANCE, IDLE = range(4)
+
+#UTILS
+def weis_to_usd(x):
+    return f"{x*1e-18*get_price('ETH', curr='USD')['ETH']['USD']:.1f} USD"
 
 # Telegram BOT job callbacks
 def job_hashrate(context):
@@ -43,10 +51,11 @@ def job_balance(context):
         balance_new = chat_data['miner'].balance()
         balance_old = chat_data['balance_old']
         if chat_data['balance_old'] != balance_new:
+            diff_weis = (balance_new-balance_old)
             bot.send_message(chat_id=chat_data['chat_id'],
-                         text=(f"Balanced has changed: {(balance_new-balance_old)/1e18:+.5f} ETH\n"
-                               f"old balance: {format_weis(balance_old)}\n"
-                               f"new balance: {format_weis(balance_new)}"))
+                         text=(f"Balanced has changed: {diff_weis*1e-18:+.5f} ETH ({weis_to_usd(diff_weis)})\n"
+                               f"old balance: {format_weis(balance_old)} ({weis_to_usd(balance_old)})\n"
+                               f"new balance: {format_weis(balance_new)} ({weis_to_usd(balance_new)})"))
             chat_data['balance_old'] = balance_new
 
 # Telegram BOT states and fallbacks callbacks
@@ -77,7 +86,7 @@ def set_min_hashrate_threshold(update, context):
         update.message.reply_text(str(e))
         return ConversationHandler.END
     if chat_data['min_hashrate_threshold'] > 0:
-        job_queue.run_repeating(job_hashrate, interval=TIME_BETWEEN_POOLS, first=0, context=chat_data, name=chat_data['chat_id']+'hashrate')
+        job_queue.run_repeating(job_hashrate, interval=HASHRATE_POLL_INVERVAL, first=0, context=chat_data, name=chat_data['chat_id']+'hashrate')
 
     keyboard = [ InlineKeyboardButton("Yes", callback_data='yes'), InlineKeyboardButton("No", callback_data='no')]
     update.message.reply_text("Do you want to be notified when your balance is updated?", reply_markup=InlineKeyboardMarkup.from_row(keyboard))
@@ -92,7 +101,7 @@ def notify_on_new_balance(update, context):
     if query.data == 'yes':
         chat_data['monitor_balance'] = True 
         chat_data['balance_old'] = chat_data['miner'].balance()
-        job_queue.run_repeating(job_balance, interval=TIME_BETWEEN_POOLS, first=0, context=chat_data, name=chat_data['chat_id']+'balance')
+        job_queue.run_repeating(job_balance, interval=BALANCE_POLL_INVERVAL, first=0, context=chat_data, name=chat_data['chat_id']+'balance')
     else:
         chat_data['monitor_balance'] = False
     return welcome_idle(update, context)
@@ -127,6 +136,7 @@ def welcome_idle(update, context):
                                                             f"Min hashrate threshold: {min_hashrate_threshold:.0f} MH/S\n"
                                                             "Send /stats to see statistics of your miner\n"
                                                             "Send /status to see the status of your jobs\n"
+                                                            "Send /balance to see your current balance\n"
                                                             "Send /cancel to stop your jobs"))
     return IDLE
 
@@ -147,7 +157,8 @@ def stats(update, context):
 def get_balance(update, context):
     chat_data = context.chat_data
     bot = context.bot
-    bot.send_message(chat_id=chat_data['chat_id'], text=f"Current balance: {format_weis(chat_data['miner'].balance())}")
+    balance_weis = chat_data['miner'].balance()
+    bot.send_message(chat_id=chat_data['chat_id'], text=f"Current balance: {format_weis(balance_weis)} ({weis_to_usd(balance_weis)})")
 
 def snooze(update, context):
     chat_data = context.chat_data
@@ -158,7 +169,7 @@ def snooze(update, context):
         bot.send_message(chat_id=chat_data['chat_id'], text="Nothing to snooze")
     else:
         bot.send_message(chat_id=chat_data['chat_id'], text="Hashrate alerts snoozed for 30min")
-        job_queue.run_repeating(job_hashrate, interval=TIME_BETWEEN_POOLS, first=30*60, context=chat_data, name=chat_data['chat_id']+'hashrate')
+        job_queue.run_repeating(job_hashrate, interval=HASHRATE_POLL_INVERVAL, first=30*60, context=chat_data, name=chat_data['chat_id']+'hashrate')
     return IDLE
 
 def error_handler(update, context) -> None:
@@ -168,11 +179,12 @@ def error_handler(update, context) -> None:
 def restore_jobs(job_queue,chat_data_dict):
     for _, chat_data in chat_data_dict.items():
         if chat_data['min_hashrate_threshold'] > 0:
-            job_queue.run_repeating(job_hashrate, interval=TIME_BETWEEN_POOLS, first=0, context=chat_data, name=chat_data['chat_id']+'hashrate')
+            job_queue.run_repeating(job_hashrate, interval=HASHRATE_POLL_INVERVAL, first=randint(0,HASHRATE_POLL_INVERVAL), context=chat_data, name=chat_data['chat_id']+'hashrate')
             logger.info(msg=f"{chat_data['chat_id']} job hashrate restarted")
 
         if chat_data['monitor_balance'] == True:
-            job_queue.run_repeating(job_balance, interval=TIME_BETWEEN_POOLS, first=0, context=chat_data, name=chat_data['chat_id']+'balance')
+            chat_data['balance_old'] = chat_data['miner'].balance()
+            job_queue.run_repeating(job_balance, interval=BALANCE_POLL_INVERVAL, first=randint(0,HASHRATE_POLL_INVERVAL), context=chat_data, name=chat_data['chat_id']+'balance')
             logger.info(msg=f"{chat_data['chat_id']} job balance restarted")
 def main():
     pp = PicklePersistence(filename='flexpoolbot')
