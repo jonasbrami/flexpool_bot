@@ -1,12 +1,14 @@
 from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters,
                               ConversationHandler,CallbackQueryHandler, PicklePersistence, messagequeue as mq)
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import Unauthorized as TelegramUnauthorizedException
 import flexpoolapi
 from flexpoolapi.utils import format_weis
 import logging
 from si_prefix import si_format
-from cryptocompare import get_price
+from pycoingecko import CoinGeckoAPI
 from random import randint
+cg = CoinGeckoAPI()
 
 #LOGGING
 logging.basicConfig(
@@ -27,7 +29,7 @@ SET_WALLET_ADDR, SET_MIN_HASHRATE_THRESHOLD, NOTIFY_ON_NEW_BALANCE, IDLE = range
 
 #UTILS
 def weis_to_usd(x):
-    return f"{x*1e-18*get_price('ETH', curr='USD')['ETH']['USD']:.1f} USD"
+    return f"{x*1e-18*cg.get_price(ids='ethereum', vs_currencies='usd')['ethereum']['usd']:.1f} USD"
 
 # Telegram BOT job callbacks
 def job_hashrate(context):
@@ -37,11 +39,21 @@ def job_hashrate(context):
     effective_hashrate, _ = chat_data['miner'].current_hashrate()
     min_hashrate_threshold = chat_data['min_hashrate_threshold']
     if effective_hashrate/1e6 < min_hashrate_threshold:
-        bot.send_message(chat_id=chat_data['chat_id'],
-                         text=("Current effective hashrate is bellow threshold \n"
-                               f"Current effective hashrate: {effective_hashrate/1e6:.0f}MH/s.\n"
-                               f"Threshold is fixed to {min_hashrate_threshold}MH/s\n"
-                               "Send /snooze to stop this alert for 30min"))
+        try:
+            bot.send_message(chat_id=chat_data['chat_id'],
+                            text=("Current effective hashrate is bellow threshold \n"
+                                f"Current effective hashrate: {effective_hashrate/1e6:.0f}MH/s.\n"
+                                f"Threshold is fixed to {min_hashrate_threshold}MH/s\n"
+                                "Send /snooze to stop this alert for 30min\n"
+                                "Send /resethashrate <Hashrate in MH> to reset the notification threshold.\n"
+                                "Example: /resethashrate 100"))
+        except TelegramUnauthorizedException as e :
+            if e.message == 'Forbidden: bot was blocked by the user':
+                chat_data['cancelled']=True
+                for job_type in ('hashrate','balance'):
+                    remove_job_if_exists(chat_data['chat_id']+job_type, context)
+                    logger.info(msg=f"job {chat_data['chat_id']+job_type} REMOVED. Reason: {e.message}")
+    return IDLE
 
 def job_balance(context):
     chat_data = context.job.context
@@ -52,16 +64,41 @@ def job_balance(context):
         balance_old = chat_data['balance_old']
         if chat_data['balance_old'] != balance_new:
             diff_weis = (balance_new-balance_old)
-            bot.send_message(chat_id=chat_data['chat_id'],
-                         text=(f"Balanced has changed: {diff_weis*1e-18:+.5f} ETH ({weis_to_usd(diff_weis)})\n"
-                               f"old balance: {format_weis(balance_old)} ({weis_to_usd(balance_old)})\n"
-                               f"new balance: {format_weis(balance_new)} ({weis_to_usd(balance_new)})"))
+            try:
+                bot.send_message(chat_id=chat_data['chat_id'],
+                            text=(f"Balanced has changed: {diff_weis*1e-18:+.5f} ETH ({weis_to_usd(diff_weis)})\n"
+                                f"old balance: {format_weis(balance_old)} ({weis_to_usd(balance_old)})\n"
+                                f"new balance: {format_weis(balance_new)} ({weis_to_usd(balance_new)})"))
+            except TelegramUnauthorizedException as e :
+                if e.message == 'Forbidden: bot was blocked by the user':
+                    chat_data['cancelled']=True
+                    for job_type in ('hashrate','balance'):
+                        remove_job_if_exists(chat_data['chat_id']+job_type, context)
+                        logger.info(msg=f"job {chat_data['chat_id']+job_type} REMOVED. Reason: {e.message}")
             chat_data['balance_old'] = balance_new
+
+def job_track_luck(context):
+    chat_data = context.job.context
+    bot = context.bot
+  
+    current_luck = int(flexpoolapi.pool.current_luck()*100)
+    if (chat_data['last_luck'] if 'last_luck' in chat_data else current_luck) != current_luck:
+        for threshold_value in [20, 50, 100, 200, 300]:
+            if current_luck < threshold_value and threshold_value <= chat_data['last_luck'] :
+                bot.send_message(chat_id=chat_data['chat_id'], text=f"The avg luck just went bellow {threshold_value}%.")
+                break
+            if current_luck >= threshold_value and threshold_value > chat_data['last_luck'] :
+                bot.send_message(chat_id=chat_data['chat_id'], text=f"The avg luck just went above {threshold_value}%.")
+                break
+    chat_data['last_luck'] = current_luck
+    return IDLE
+    
 
 # Telegram BOT states and fallbacks callbacks
 def start(update, context):
     chat_data = context.chat_data
     chat_data['chat_id'] = str(update.message.chat_id)
+    chat_data['cancelled'] = False
 
     update.message.reply_text("Enter your eth wallet address")
     return SET_WALLET_ADDR
@@ -106,7 +143,6 @@ def notify_on_new_balance(update, context):
         chat_data['monitor_balance'] = False
     return welcome_idle(update, context)
 
-
 def remove_job_if_exists(name, context):
     """Remove job with given name. Returns whether job was removed."""
     current_jobs = context.job_queue.get_jobs_by_name(name)
@@ -119,9 +155,11 @@ def remove_job_if_exists(name, context):
 
 def cancel(update, context):
     chat_data = context.chat_data
+    chat_data['cancelled'] = True
     for job_type in ('hashrate','balance'):
         remove_job_if_exists(chat_data['chat_id']+job_type, context)
-    update.message.reply_text("Job Stopped! You will stop receiving alerts. Send /start to create a new job")
+    if update is not None:
+        update.message.reply_text("Job Stopped! You will stop receiving alerts. Send /start to create a new job")
     return ConversationHandler.END
 
 def welcome_idle(update, context):
@@ -137,7 +175,10 @@ def welcome_idle(update, context):
                                                             "Send /stats to see statistics of your miner\n"
                                                             "Send /status to see the status of your jobs\n"
                                                             "Send /balance to see your current balance\n"
-                                                            "Send /cancel to stop your jobs"))
+                                                            "Send /luck to see the current luck of the pool with round time\n"
+                                                            "Send /cancel to stop your jobs\n"
+                                                            "Send /resethashrate <Hashrate in MH> to reset the notification threshold.\n"
+                                                            "Example: /resethashrate 100"))
     return IDLE
 
 def stats(update, context):
@@ -172,12 +213,39 @@ def snooze(update, context):
         job_queue.run_repeating(job_hashrate, interval=HASHRATE_POLL_INVERVAL, first=30*60, context=chat_data, name=chat_data['chat_id']+'hashrate')
     return IDLE
 
+def reset_hashrate_alert(update,context):
+    bot = context.bot
+    chat_data = context.chat_data
+    job_queue = context.job_queue
+    
+    try:
+        if update.message.text == '/resethashrate':
+            bot.send_message(chat_id=chat_data['chat_id'], text="Don't forget to write the hashrate (in MH/S)\nExample: /resethashrate 100")
+            return IDLE
+        chat_data['min_hashrate_threshold'] = float(update.message.text.split(' ')[1])
+        remove_job_if_exists(chat_data['chat_id']+'hashrate', context)
+        job_queue.run_repeating(job_hashrate, interval=HASHRATE_POLL_INVERVAL, first=0, context=chat_data, name=chat_data['chat_id']+'hashrate')
+    except Exception as e:
+        update.message.reply_text(str(e))
+        return ConversationHandler.END
+    welcome_idle(update, context)
+
+def get_current_luck(update,context):
+    bot = context.bot
+    chat_data = context.chat_data
+    luck, round_time = flexpoolapi.pool.avg_luck_roundtime()
+    bot.send_message(chat_id=chat_data['chat_id'], text=f"Current Avg Luck: {luck*100:.0f}%\nAvg Round Time: {round_time/3600:.1f} hours")
+    return IDLE
+
 def error_handler(update, context) -> None:
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
     return IDLE
 
 def restore_jobs(job_queue,chat_data_dict):
     for _, chat_data in chat_data_dict.items():
+        if (chat_data['cancelled'] if 'cancelled' in chat_data else False) :
+            continue #do not restore the jobs of cancelled guys
+
         if chat_data['min_hashrate_threshold'] > 0:
             job_queue.run_repeating(job_hashrate, interval=HASHRATE_POLL_INVERVAL, first=randint(0,HASHRATE_POLL_INVERVAL), context=chat_data, name=chat_data['chat_id']+'hashrate')
             logger.info(msg=f"{chat_data['chat_id']} job hashrate restarted")
@@ -186,6 +254,10 @@ def restore_jobs(job_queue,chat_data_dict):
             chat_data['balance_old'] = chat_data['miner'].balance()
             job_queue.run_repeating(job_balance, interval=BALANCE_POLL_INVERVAL, first=randint(0,HASHRATE_POLL_INVERVAL), context=chat_data, name=chat_data['chat_id']+'balance')
             logger.info(msg=f"{chat_data['chat_id']} job balance restarted")
+
+        job_queue.run_repeating(job_track_luck, interval=BALANCE_POLL_INVERVAL, first=randint(0,HASHRATE_POLL_INVERVAL), context=chat_data, name=chat_data['chat_id']+'luck')
+        logger.info(msg=f"{chat_data['chat_id']} job luck restarted")
+        
 def main():
     pp = PicklePersistence(filename='flexpoolbot')
     updater = Updater(token=BOT_TOKEN, persistence=pp, use_context=True)
@@ -201,8 +273,9 @@ def main():
 
             NOTIFY_ON_NEW_BALANCE: [CallbackQueryHandler(notify_on_new_balance)],
 
-            IDLE: [CommandHandler('stats', stats), CommandHandler('status', welcome_idle),
-                 CommandHandler('balance', get_balance), CommandHandler('snooze',snooze)],
+            IDLE: [ CommandHandler('stats', stats), CommandHandler('status', welcome_idle),
+                    CommandHandler('balance', get_balance), CommandHandler('snooze',snooze),
+                    CommandHandler('resethashrate', reset_hashrate_alert), CommandHandler('luck', get_current_luck) ],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
         name='ConversationHandler',
