@@ -49,10 +49,7 @@ def job_hashrate(context):
                                 "Example: /resethashrate 100"))
         except TelegramUnauthorizedException as e :
             if e.message == 'Forbidden: bot was blocked by the user':
-                chat_data['cancelled']=True
-                for job_type in ('hashrate','balance'):
-                    remove_job_if_exists(chat_data['chat_id']+job_type, context)
-                    logger.info(msg=f"job {chat_data['chat_id']+job_type} REMOVED. Reason: {e.message}")
+               remove_jobs_after_exception(context,e)
     return IDLE
 
 def job_balance(context):
@@ -71,29 +68,39 @@ def job_balance(context):
                                 f"new balance: {format_weis(balance_new)} ({weis_to_usd(balance_new)})"))
             except TelegramUnauthorizedException as e :
                 if e.message == 'Forbidden: bot was blocked by the user':
-                    chat_data['cancelled']=True
-                    for job_type in ('hashrate','balance'):
-                        remove_job_if_exists(chat_data['chat_id']+job_type, context)
-                        logger.info(msg=f"job {chat_data['chat_id']+job_type} REMOVED. Reason: {e.message}")
+                    remove_jobs_after_exception(context,e)
             chat_data['balance_old'] = balance_new
 
-def job_track_luck(context):
+def remove_jobs_after_exception(context,e):
+    chat_data = context.job.context
+    chat_data['cancelled']=True
+    for job_type in ('hashrate','balance', 'luck'):
+        remove_job_if_exists(chat_data['chat_id']+job_type, context)
+        logger.info(msg=f"job {chat_data['chat_id']+job_type} REMOVED. Reason: {e.message}")
+
+def job_track_luck_and_block(context):
     chat_data = context.job.context
     bot = context.bot
-  
-    current_luck = int(flexpoolapi.pool.current_luck()*100)
-    if (chat_data['last_luck'] if 'last_luck' in chat_data else current_luck) != current_luck:
-        for threshold_value in [20, 50, 100, 200, 300]:
-            if current_luck < threshold_value and threshold_value <= chat_data['last_luck'] :
-                bot.send_message(chat_id=chat_data['chat_id'], text=f"The avg luck just went bellow {threshold_value}%.")
-                break
-            if current_luck >= threshold_value and threshold_value > chat_data['last_luck'] :
-                bot.send_message(chat_id=chat_data['chat_id'], text=f"The avg luck just went above {threshold_value}%.")
-                break
-    chat_data['last_luck'] = current_luck
+    
+    avg_luck, _ = flexpoolapi.pool.avg_luck_roundtime()
+    avg_luck = int(avg_luck*100)
+    try:
+        if (chat_data['last_avg_luck'] if 'last_avg_luck' in chat_data else avg_luck) != avg_luck:
+            bot.send_message(chat_id=chat_data['chat_id'], text="New block ! Your balance will be updated soon!")
+            threshold_values = [20, 50, 100, 200, 300, 400, 500]
+            for threshold_value, threshold_value_r in zip(threshold_values,reversed(threshold_values)):
+                if avg_luck < threshold_value and threshold_value <= chat_data['last_avg_luck'] :
+                    bot.send_message(chat_id=chat_data['chat_id'], text=f"The avg luck just went bellow {threshold_value}%.")
+                    break
+                if avg_luck >= threshold_value_r and threshold_value_r > chat_data['last_avg_luck'] :
+                    bot.send_message(chat_id=chat_data['chat_id'], text=f"The avg luck just went above {threshold_value_r}%.")
+                    break
+    except TelegramUnauthorizedException as e :
+            if e.message == 'Forbidden: bot was blocked by the user':
+               remove_jobs_after_exception(context,e)
+    chat_data['last_avg_luck'] = avg_luck
     return IDLE
     
-
 # Telegram BOT states and fallbacks callbacks
 def start(update, context):
     chat_data = context.chat_data
@@ -230,7 +237,7 @@ def reset_hashrate_alert(update,context):
         return ConversationHandler.END
     welcome_idle(update, context)
 
-def get_current_luck(update,context):
+def get_current_avg_luck(update,context):
     bot = context.bot
     chat_data = context.chat_data
     luck, round_time = flexpoolapi.pool.avg_luck_roundtime()
@@ -255,7 +262,9 @@ def restore_jobs(job_queue,chat_data_dict):
             job_queue.run_repeating(job_balance, interval=BALANCE_POLL_INVERVAL, first=randint(0,HASHRATE_POLL_INVERVAL), context=chat_data, name=chat_data['chat_id']+'balance')
             logger.info(msg=f"{chat_data['chat_id']} job balance restarted")
 
-        job_queue.run_repeating(job_track_luck, interval=BALANCE_POLL_INVERVAL, first=randint(0,HASHRATE_POLL_INVERVAL), context=chat_data, name=chat_data['chat_id']+'luck')
+        avg_luck, _ = flexpoolapi.pool.avg_luck_roundtime()
+        chat_data['last_avg_luck'] = int(avg_luck*100)
+        job_queue.run_repeating(job_track_luck_and_block, interval=BALANCE_POLL_INVERVAL, first=randint(0,HASHRATE_POLL_INVERVAL), context=chat_data, name=chat_data['chat_id']+'luck')
         logger.info(msg=f"{chat_data['chat_id']} job luck restarted")
         
 def main():
@@ -275,7 +284,7 @@ def main():
 
             IDLE: [ CommandHandler('stats', stats), CommandHandler('status', welcome_idle),
                     CommandHandler('balance', get_balance), CommandHandler('snooze',snooze),
-                    CommandHandler('resethashrate', reset_hashrate_alert), CommandHandler('luck', get_current_luck) ],
+                    CommandHandler('resethashrate', reset_hashrate_alert), CommandHandler('luck', get_current_avg_luck) ],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
         name='ConversationHandler',
