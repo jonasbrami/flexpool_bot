@@ -8,6 +8,7 @@ import logging
 from si_prefix import si_format
 from pycoingecko import CoinGeckoAPI
 from random import randint
+from datetime import datetime, timedelta
 cg = CoinGeckoAPI()
 
 #LOGGING
@@ -35,7 +36,8 @@ def weis_to_usd(x):
 def job_hashrate(context):
     chat_data = context.job.context
     bot = context.bot
-    
+    job_queue = context.job_queue
+
     effective_hashrate, _ = chat_data['miner'].current_hashrate()
     min_hashrate_threshold = chat_data['min_hashrate_threshold']
     if effective_hashrate/1e6 < min_hashrate_threshold:
@@ -50,6 +52,9 @@ def job_hashrate(context):
         except TelegramUnauthorizedException as e :
             if e.message == 'Forbidden: bot was blocked by the user':
                remove_jobs_after_exception(context,e)
+
+        remove_job_if_exists(chat_data['chat_id']+'hashrate', context)
+        job_queue.run_repeating(job_hashrate, interval=HASHRATE_POLL_INVERVAL, first=600, context=chat_data, name=chat_data['chat_id']+'hashrate')
     return IDLE
 
 def job_balance(context):
